@@ -1,175 +1,499 @@
-import { useEffect, useRef, useState } from 'react';
-import { Aperture, Camera, CircleHelp, Mic, RotateCcw, Settings2, VolumeX, X } from 'lucide-react';
+import React, { useEffect, useState, useCallback, useRef, Component } from 'react';
+import { useCamera } from './hooks/useCamera';
+import { useTensorflow, formatObstacleWarning } from './hooks/useTensorflow';
+import { useSpeech, isHindiText } from './hooks/useSpeech';
+import { useGemini } from './hooks/useGemini';
 
-const API_BASE = import.meta.env.VITE_API_URL || '';
+/**
+ * Error Boundary
+ */
+class ErrorBoundary extends Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
 
-export default function App() {
-  const videoRef = useRef(null);
-  const streamRef = useRef(null);
-  const recognitionRef = useRef(null);
-  const [status, setStatus] = useState('Ready');
-  const [busy, setBusy] = useState(false);
-  const [answer, setAnswer] = useState('Tap the large button to describe what the camera sees.');
-  const [question, setQuestion] = useState('');
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  const [language, setLanguage] = useState('en-US');
-  const [rate, setRate] = useState(1);
-  const [cameraOpen, setCameraOpen] = useState(false);
-  const [error, setError] = useState('');
+  static getDerivedStateFromError(error) {
+    return { hasError: true, error };
+  }
 
-  const speak = (text) => {
-    if (!('speechSynthesis' in window)) return;
-    window.speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.lang = language;
-    utterance.rate = Number(rate);
-    utterance.onstart = () => setStatus('Speaking');
-    utterance.onend = () => setStatus('Ready');
-    window.speechSynthesis.speak(utterance);
-  };
+  componentDidCatch(error, errorInfo) {
+    console.error('AURA AI UI Error:', error, errorInfo);
+  }
 
-  const stopCamera = () => {
-    streamRef.current?.getTracks().forEach((track) => track.stop());
-    streamRef.current = null;
-    setCameraOpen(false);
-  };
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div style={{
+          minHeight: '100vh',
+          background: '#181613',
+          color: '#ede8df',
+          padding: '24px',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          textAlign: 'center',
+          fontFamily: 'sans-serif'
+        }}>
+          <h1 style={{ color: '#e05d4f', fontSize: '24px', marginBottom: '12px' }}>AURA AI Recovery</h1>
+          <p style={{ maxWidth: '400px', marginBottom: '20px', lineHeight: '1.5', color: '#c8a66b' }}>
+            A temporary issue occurred. Tap below to reload the vision assistant.
+          </p>
+          <button
+            type="button"
+            onClick={() => window.location.reload()}
+            style={{
+              background: '#c8a66b',
+              color: '#181613',
+              border: 'none',
+              padding: '12px 24px',
+              fontSize: '16px',
+              fontWeight: 'bold',
+              borderRadius: '8px',
+              cursor: 'pointer'
+            }}
+          >
+            Reload AURA AI
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
-  useEffect(() => () => {
-    streamRef.current?.getTracks().forEach((track) => track.stop());
-    window.speechSynthesis?.cancel();
-    recognitionRef.current?.abort();
-  }, []);
+function MainApp() {
+  const [hasActivated, setHasActivated] = useState(false);
+  const [statusText, setStatusText] = useState('Tap anywhere to speak or say "Hey Aura"');
 
-  const getFrame = async () => {
-    setError('');
-    if (!navigator.mediaDevices?.getUserMedia) throw new Error('Camera access is unavailable. Open this app on localhost or a secure HTTPS connection.');
-    setStatus('Starting camera');
-    speak('Camera starting');
-    let stream = streamRef.current;
-    if (!stream) {
-      try {
-        stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 960 } }, audio: false });
-      } catch {
-        throw new Error('I could not open the camera. Check camera permission and try again.');
+  // Callback ref bridge
+  const onCommandRef = useRef(null);
+  const onWakeRef = useRef(null);
+  const onBargeInRef = useRef(null);
+  const onToggleMuteRef = useRef(null);
+  const onStopDetectionRef = useRef(null);
+  const onStartDetectionRef = useRef(null);
+  const isBusyRef = useRef(false);
+
+  // 1. Camera Hook
+  const {
+    videoRef,
+    isCameraActive,
+    cameraError,
+    startCamera,
+    captureSnapshot,
+  } = useCamera();
+
+  // 2. Gemini Cloud Hook (Engine B: On-Demand Scene, Currency & Q&A)
+  const {
+    analyzeFrame,
+    abortAnalysis,
+  } = useGemini();
+
+  // 3. Speech Hook (Single Unified High-Fidelity Voice + Enhanced Voice Recognition)
+  const {
+    isSpeaking,
+    isListening,
+    micNotice,
+    activeLang,
+    speak,
+    stopSpeaking,
+    toggleLanguage,
+    unlockMic,
+    triggerListenNow,
+  } = useSpeech({
+    onCommand: (cmd) => onCommandRef.current?.(cmd),
+    onWake: () => onWakeRef.current?.(),
+    onBargeIn: () => onBargeInRef.current?.(),
+    onToggleMute: (action) => onToggleMuteRef.current?.(action),
+    onStopDetection: () => onStopDetectionRef.current?.(),
+    onStartDetection: () => onStartDetectionRef.current?.(),
+  });
+
+  // 4. Real-time Spoken Obstacle Alert Handler (Only active when alerts are enabled)
+  const handleObstacleAlert = useCallback(
+    (obstacle) => {
+      if (isBusyRef.current || isSpeaking) return false;
+      const isHindi = activeLang && activeLang.startsWith('hi');
+      const warningText = formatObstacleWarning(obstacle, isHindi);
+      if (warningText) {
+        speak(warningText, { isUrgent: obstacle.distanceLabel === 'urgent' });
+        return true;
       }
-      streamRef.current = stream;
-    }
-    const video = videoRef.current;
-    video.srcObject = stream;
-    setCameraOpen(true);
-    await video.play();
-    if (!video.videoWidth) await new Promise((resolve) => { video.onloadedmetadata = resolve; });
-    const canvas = document.createElement('canvas');
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    canvas.getContext('2d').drawImage(video, 0, 0);
-    const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.82));
-    if (!blob) throw new Error('I could not capture an image. Please try again.');
-    stopCamera();
-    return blob;
-  };
+      return false;
+    },
+    [activeLang, isSpeaking, speak]
+  );
 
-  const analyze = async (userQuestion = '') => {
-    if (busy) return;
-    setBusy(true);
-    setStatus('Capturing image');
-    try {
-      const image = await getFrame();
-      setStatus('Analyzing image');
-      speak('Analyzing the image');
-      const form = new FormData();
-      form.append('image', image, 'capture.jpg');
-      if (userQuestion) form.append('question', userQuestion);
-      const response = await fetch(`${API_BASE}/api/vision`, { method: 'POST', body: form });
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(data.error || 'The image could not be analyzed. Check your setup and try again.');
-      setAnswer(data.answer);
-      speak(data.answer);
-    } catch (err) {
-      const message = err.message || 'Something went wrong. Please try again.';
-      setError(message);
-      setAnswer(message);
-      speak(message);
-    } finally {
-      setBusy(false);
-      stopCamera();
-    }
-  };
+  // 5. TensorFlow COCO-SSD Hook (Alerts OFF by default; starts only when user says "Alert On")
+  const {
+    isMuted,
+    toggleMute,
+    isDetectionActive,
+    detectedCount,
+    startDetection,
+    stopDetection,
+    setIsPaused: setTensorflowPaused,
+    playTone,
+    triggerHaptic,
+    unlockAudio,
+  } = useTensorflow(videoRef, isCameraActive, {
+    onObstacleAlert: handleObstacleAlert,
+    isSpeaking,
+  });
 
-  const ask = () => {
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SpeechRecognition) {
-      setStatus('Type a question');
-      speak('Voice input is not available in this browser. Type your question in the question box.');
-      document.getElementById('question-input')?.focus();
-      return;
+  /* ================================================================
+     WAKE WORD BARGE-IN INTERRUPTION HANDLER
+     ================================================================ */
+  const handleBargeIn = useCallback(() => {
+    console.log('[AURA AI] Barge-in triggered. Aborting current operations.');
+    stopSpeaking();
+    abortAnalysis();
+    isBusyRef.current = false;
+    if (isDetectionActive) {
+      setTensorflowPaused(false);
     }
-    window.speechSynthesis?.cancel();
-    const recognition = new SpeechRecognition();
-    recognition.lang = language;
-    recognition.interimResults = false;
-    recognition.maxAlternatives = 1;
-    recognitionRef.current = recognition;
-    setStatus('Listening');
-    speak('I am listening. Ask your question.');
-    recognition.onresult = (event) => {
-      const spokenQuestion = event.results[0][0].transcript;
-      setQuestion(spokenQuestion);
-      analyze(spokenQuestion);
+    playTone(900, 0.05);
+    setStatusText('Listening to you… Speak now');
+  }, [stopSpeaking, abortAnalysis, isDetectionActive, setTensorflowPaused, playTone]);
+
+  /* ================================================================
+     ON-DEMAND VISION SCANNER (Currency, Ahead, Text & User Q&A)
+     Single consistent AI voice output — no clashing voices
+     ================================================================ */
+  const runVisionAnalysis = useCallback(
+    async (mode = 'describe', queryText = '') => {
+      if (isBusyRef.current) return;
+      isBusyRef.current = true;
+
+      // Temporarily pause obstacle radar
+      setTensorflowPaused(true);
+      playTone(mode === 'currency' ? 750 : 580, 0.08);
+      triggerHaptic([60]);
+
+      const isHindi = isHindiText(queryText) || (activeLang && activeLang.startsWith('hi'));
+      const statusAction =
+        mode === 'currency'
+          ? isHindi ? 'नोट की जाँच हो रही है…' : 'Checking currency note…'
+          : mode === 'question'
+          ? isHindi ? 'आपके सवाल का जवाब खोजा जा रहा है…' : 'Checking what you asked…'
+          : isHindi ? 'सामने का दृश्य देखा जा रहा है…' : 'Analyzing what is ahead…';
+
+      setStatusText(statusAction);
+
+      try {
+        // Step 1: Capture offscreen compressed 640x480 frame (<50KB)
+        const snapshot = await captureSnapshot();
+
+        // Step 2: Query Gemini Cloud Engine
+        const answer = await analyzeFrame(snapshot, {
+          mode: mode === 'question' ? 'describe' : mode,
+          question: queryText,
+          language: isHindi ? 'hi-IN' : 'en-US',
+        });
+
+        if (answer) {
+          setStatusText(isHindi ? 'बोल रहा हूँ…' : 'Speaking…');
+          playTone(880, 0.06);
+
+          // Step 3: Speak description aloud via Single Unified AI Voice
+          speak(answer, {
+            onFinish: () => {
+              isBusyRef.current = false;
+              if (isDetectionActive) setTensorflowPaused(false);
+              setStatusText('Listening hands-free. Say "Hey Aura" anytime.');
+            },
+          });
+        } else {
+          isBusyRef.current = false;
+          if (isDetectionActive) setTensorflowPaused(false);
+          setStatusText('Listening hands-free. Say "Hey Aura" anytime.');
+        }
+      } catch (err) {
+        if (err.name === 'AbortError') {
+          console.log('[AURA AI] Vision analysis aborted by user barge-in.');
+          return;
+        }
+        console.error('Vision analysis error:', err);
+        const errMsg = isHindi
+          ? 'विश्लेषण नहीं हो सका। कृपया दोबारा पूछें।'
+          : 'Could not complete analysis. Please ask again.';
+        setStatusText(errMsg);
+        speak(errMsg, {
+          onFinish: () => {
+            isBusyRef.current = false;
+            if (isDetectionActive) setTensorflowPaused(false);
+            setStatusText('Listening hands-free. Say "Hey Aura" anytime.');
+          },
+        });
+      }
+    },
+    [captureSnapshot, analyzeFrame, setTensorflowPaused, playTone, triggerHaptic, activeLang, speak, isDetectionActive]
+  );
+
+  /* ================================================================
+     VOICE COMMAND DISPATCHER & STATE MACHINE
+     Handles: currency, ahead, stop_detection, start_detection, & user questions
+     ================================================================ */
+  const handleVoiceCommand = useCallback(
+    (cmd) => {
+      unlockAudio();
+      if (cmd.type === 'currency') {
+        runVisionAnalysis('currency', cmd.query || cmd.raw);
+      } else if (cmd.type === 'describe') {
+        runVisionAnalysis('describe', cmd.query || cmd.raw);
+      } else if (cmd.type === 'read') {
+        runVisionAnalysis('read', cmd.query || cmd.raw);
+      } else if (cmd.type === 'question') {
+        // Conversational Q&A: listens to user and replies according to what they ask
+        runVisionAnalysis('question', cmd.query || cmd.raw);
+      }
+    },
+    [runVisionAnalysis, unlockAudio]
+  );
+
+  const handleWakeWord = useCallback(() => {
+    unlockAudio();
+    playTone(880, 0.08);
+    setTimeout(() => playTone(1174, 0.12), 70);
+    triggerHaptic([70, 40, 70]);
+
+    const isHindi = activeLang && activeLang.startsWith('hi');
+    speak(isHindi ? 'हाँ, बताइए।' : 'I am listening, what is your question?', {
+      onFinish: () => {
+        setStatusText(isHindi ? 'सुन रहा हूँ… बोलिए' : 'Listening to you… Speak now');
+        triggerListenNow();
+      },
+    });
+  }, [playTone, triggerHaptic, unlockAudio, activeLang, speak, triggerListenNow]);
+
+  const handleVoiceToggleMute = useCallback(
+    (action) => {
+      if (action === 'mute' && !isMuted) {
+        toggleMute();
+        speak(activeLang && activeLang.startsWith('hi') ? 'बीप बंद।' : 'Obstacle beeps muted.');
+      } else if (action === 'unmute' && isMuted) {
+        toggleMute();
+        speak(activeLang && activeLang.startsWith('hi') ? 'बीप चालू।' : 'Obstacle beeps unmuted.');
+      }
+    },
+    [isMuted, toggleMute, activeLang, speak]
+  );
+
+  // User says "alert on" -> start camera detection alert
+  const handleStartDetection = useCallback(() => {
+    unlockAudio();
+    startDetection();
+    const isHindi = activeLang && activeLang.startsWith('hi');
+    const msg = isHindi ? 'अलर्ट चालू।' : 'Alerts on.';
+    speak(msg);
+    setStatusText('Obstacle alerts active');
+  }, [startDetection, activeLang, speak, unlockAudio]);
+
+  // User says "stop detection" or "alert off" -> stop camera detection alert
+  const handleStopDetection = useCallback(() => {
+    unlockAudio();
+    stopDetection();
+    const isHindi = activeLang && activeLang.startsWith('hi');
+    const msg = isHindi ? 'अलर्ट बंद।' : 'Alerts off.';
+    speak(msg);
+    setStatusText('Listening hands-free. Say "Hey Aura" anytime.');
+  }, [stopDetection, activeLang, speak, unlockAudio]);
+
+  // Connect stable callback refs
+  useEffect(() => {
+    onCommandRef.current = handleVoiceCommand;
+    onWakeRef.current = handleWakeWord;
+    onBargeInRef.current = handleBargeIn;
+    onToggleMuteRef.current = handleVoiceToggleMute;
+    onStopDetectionRef.current = handleStopDetection;
+    onStartDetectionRef.current = handleStartDetection;
+  }, [
+    handleVoiceCommand,
+    handleWakeWord,
+    handleBargeIn,
+    handleVoiceToggleMute,
+    handleStopDetection,
+    handleStartDetection,
+  ]);
+
+  /* Keyboard Navigation fallback */
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+      unlockAudio();
+
+      if (e.code === 'Space') {
+        e.preventDefault();
+        // Spacebar triggers listen mode to speak to Aura
+        triggerListenNow();
+        setStatusText('Listening to you… Speak now');
+        playTone(880, 0.08);
+      } else if (e.code === 'KeyC') {
+        e.preventDefault();
+        runVisionAnalysis('currency');
+      } else if (e.code === 'KeyA') {
+        e.preventDefault();
+        runVisionAnalysis('describe');
+      } else if (e.code === 'KeyM') {
+        e.preventDefault();
+        toggleMute();
+      } else if (e.code === 'KeyS' || e.code === 'Escape') {
+        e.preventDefault();
+        stopSpeaking();
+        abortAnalysis();
+      }
     };
-    recognition.onerror = () => { setStatus('Ready'); setError('I could not hear that. Try again or type your question.'); };
-    recognition.onend = () => { if (!busy) setStatus('Ready'); };
-    recognition.start();
-  };
 
-  const submitTypedQuestion = (event) => {
-    event.preventDefault();
-    if (question.trim()) analyze(question.trim());
-  };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [runVisionAnalysis, toggleMute, stopSpeaking, abortAnalysis, unlockAudio, triggerListenNow, playTone]);
+
+  /* Camera Initialization */
+  useEffect(() => {
+    async function init() {
+      await startCamera();
+    }
+    init();
+  }, [startCamera]);
+
+  /* Direct "Listen to User" Tap Handler */
+  const handleListenAction = useCallback(
+    async (e) => {
+      if (e?.target?.closest('header')) return;
+      unlockAudio();
+      await unlockMic();
+      playTone(880, 0.1);
+
+      if (!hasActivated) {
+        setHasActivated(true);
+        setStatusText('Listening to you… Speak now');
+        const isHindi = activeLang && activeLang.startsWith('hi');
+        speak(
+          isHindi
+            ? 'ऑरा सक्रिय है। पूछिए क्या देखना है, या बोलें नोट चेक करो।'
+            : 'Aura is listening. Ask what is ahead, check money, or turn alert on.'
+        );
+        triggerListenNow();
+      } else {
+        setStatusText('Listening to you… Speak now');
+        triggerListenNow();
+      }
+    },
+    [unlockAudio, unlockMic, hasActivated, activeLang, speak, playTone, triggerListenNow]
+  );
 
   return (
-    <main className="app-shell">
-      <header className="topbar">
-        <a className="brand" href="#home" aria-label="AURA AI home"><span className="brand-mark"><Aperture size={25} strokeWidth={1.8} /></span><span><strong>AURA <em>AI</em></strong><small>Your Eyes, Your Freedom</small></span></a>
-        <button className="icon-button" aria-label="Open settings" onClick={() => setSettingsOpen(true)}><Settings2 size={21} /></button>
+    <div className="aura-shell" onClick={handleListenAction}>
+      {/* Minimal Header */}
+      <header className="aura-header">
+        <div className="brand-group">
+          <span className="brand-title">AURA AI</span>
+          {/* Alert On/Off Toggle Button */}
+          <button
+            type="button"
+            className={`status-pill ${isDetectionActive ? 'pill-active' : 'pill-inactive'}`}
+            onClick={(e) => {
+              e.stopPropagation();
+              unlockAudio();
+              if (isDetectionActive) {
+                handleStopDetection();
+              } else {
+                handleStartDetection();
+              }
+            }}
+            title="Click or say 'Alert On' / 'Stop Detection'"
+          >
+            <span className={`status-dot ${isDetectionActive ? 'listening' : ''}`} />
+            <span>{isDetectionActive ? 'ALERTS: ON' : 'ALERTS: OFF'}</span>
+          </button>
+        </div>
+
+        <div className="header-actions">
+          {/* Mute Proximity Beeps */}
+          <button
+            type="button"
+            className={`control-btn ${isMuted ? 'btn-muted' : ''}`}
+            onClick={(e) => {
+              e.stopPropagation();
+              unlockAudio();
+              toggleMute();
+            }}
+            aria-label={isMuted ? 'Beeps muted' : 'Beeps active'}
+          >
+            {isMuted ? 'MUTED (M)' : 'BEEPS (M)'}
+          </button>
+
+          {/* Language Switch */}
+          <button
+            type="button"
+            className="lang-badge"
+            onClick={(e) => {
+              e.stopPropagation();
+              unlockAudio();
+              toggleLanguage();
+            }}
+            aria-label="Toggle language"
+          >
+            {activeLang && activeLang.startsWith('hi') ? 'हिन्दी' : 'English'}
+          </button>
+        </div>
       </header>
 
-      <section className="hero" id="home" aria-labelledby="welcome">
-        <p className="eyebrow"><span className="live-dot" /> YOUR PERSONAL VISION ASSISTANT</p>
-        <h1 id="welcome">Understand what’s<br /><span>around you.</span></h1>
-        <p className="intro">Point your camera. Ask a question. Hear what matters.</p>
-        <button className={`primary-action ${busy ? 'is-busy' : ''}`} onClick={() => analyze()} disabled={busy} aria-label="Capture a photo and hear a description of what is visible">
-          <span className="action-icon"><Camera size={27} /></span><span className="action-title">{busy ? 'PLEASE WAIT' : 'TAP TO UNDERSTAND'}</span><span className="action-hint">{busy ? status.toUpperCase() : 'Capture and describe'}</span>
-        </button>
-        <div className="secondary-actions">
-          <button className="secondary-button" onClick={ask} disabled={busy}><Mic size={19} /><span>ASK A QUESTION</span></button>
-          <button className="secondary-button" onClick={() => answer && speak(answer)} disabled={!answer}><RotateCcw size={18} /><span>REPEAT</span></button>
-          <button className="secondary-button stop-button" onClick={() => { window.speechSynthesis?.cancel(); recognitionRef.current?.abort(); stopCamera(); setBusy(false); setStatus('Ready'); }}><VolumeX size={18} /><span>STOP</span></button>
+      {/* Main Viewport: Clean Camera View + Acoustic Listen Hub */}
+      <main className="aura-main">
+        <div className="camera-clean-card" aria-hidden="true">
+          <video
+            ref={videoRef}
+            className="camera-clean-video"
+            playsInline
+            muted
+            autoPlay
+          />
         </div>
-        <form className="typed-question" onSubmit={submitTypedQuestion}>
-          <label className="sr-only" htmlFor="question-input">Type a question about the camera view</label>
-          <input id="question-input" value={question} onChange={(e) => setQuestion(e.target.value)} placeholder="Or type a question…" />
-          <button type="submit" disabled={busy || !question.trim()}>Ask</button>
-        </form>
-      </section>
 
-      <section className="response" aria-live="polite" aria-atomic="true">
-        <div className="response-heading"><span className="response-symbol"><CircleHelp size={17} /></span><span>WHAT I HEAR</span><span className="status-pill">{status}</span></div>
-        <p>{answer}</p>
-        {error && <p className="error-text">{error}</p>}
-      </section>
+        {/* Central Voice & Acoustic Hub — Tap to Speak to Aura */}
+        <div className="acoustic-hub" role="status" aria-live="polite">
+          <div className={`acoustic-pulse-ring ${isSpeaking ? 'speaking' : isListening ? 'listening' : ''}`}>
+            <div className="acoustic-core" />
+          </div>
+          <h1 className="aura-status-line">
+            {!hasActivated ? 'Tap anywhere to start Aura' : statusText}
+          </h1>
+          <p className="aura-sub-caption">
+            {!hasActivated
+              ? 'Tap screen once to enable voice assistant'
+              : isDetectionActive
+              ? `Radar active (${detectedCount} obstacle${detectedCount === 1 ? '' : 's'} in view) • Say "Stop detection" to pause`
+              : 'Say "Alert on" to start camera detection • "Check money" • "What\'s ahead"'}
+          </p>
+        </div>
 
-      <footer className="safety-note"><span className="note-bar" />AURA AI is an assistive tool. It may miss hazards. Use your usual mobility aids and stay aware of your surroundings.</footer>
+        {/* Error notices */}
+        {cameraError && <div className="notice-banner" role="alert">{cameraError}</div>}
+        {micNotice && <div className="notice-banner" role="alert">{micNotice}</div>}
+      </main>
 
-      <video ref={videoRef} className="camera-video" playsInline muted aria-hidden="true" />
+      {/* Footer */}
+      <footer className="aura-footer">
+        <span className="footer-voice-hint">
+          {!hasActivated ? '👉 Tap anywhere to activate audio' : '🎤 Tap circle or say "Hey Aura" to speak'}
+        </span>
+        <div className="footer-links">
+          <a href="#terms">Terms</a>
+          <span className="divider">•</span>
+          <a href="#privacy">Privacy</a>
+        </div>
+      </footer>
+    </div>
+  );
+}
 
-      {settingsOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(e) => { if (e.target === e.currentTarget) setSettingsOpen(false); }}><section className="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title">
-        <div className="modal-heading"><div><p className="eyebrow">PREFERENCES</p><h2 id="settings-title">Settings</h2></div><button className="icon-button" aria-label="Close settings" onClick={() => setSettingsOpen(false)}><X size={20} /></button></div>
-        <label className="setting-label" htmlFor="language">Spoken language<select id="language" value={language} onChange={(e) => setLanguage(e.target.value)}><option value="en-US">English</option><option value="hi-IN">Hindi</option></select></label>
-        <label className="setting-label" htmlFor="rate">Speech speed <span>{Number(rate).toFixed(1)}×</span><input id="rate" type="range" min="0.7" max="1.3" step="0.1" value={rate} onChange={(e) => setRate(e.target.value)} /></label>
-        <p className="setting-caption">Voice availability depends on your browser and device.</p>
-        <button className="secondary-button modal-done" onClick={() => setSettingsOpen(false)}>DONE</button>
-      </section></div>}
-    </main>
+export default function App() {
+  return (
+    <ErrorBoundary>
+      <MainApp />
+    </ErrorBoundary>
   );
 }
