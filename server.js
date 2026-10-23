@@ -31,7 +31,11 @@ app.get('/api/health', (_req, res) => {
   res.json({
     ok: true,
     configured: Boolean(geminiKey || openai),
-    provider: geminiKey ? 'gemini' : (openai ? 'openai' : 'none'),
+    providers: {
+      gemini: Boolean(geminiKey),
+      openai: Boolean(openai),
+    },
+    activeProvider: geminiKey ? (openai ? 'gemini+openai' : 'gemini') : (openai ? 'openai' : 'none'),
   });
 });
 
@@ -185,35 +189,53 @@ async function handleVisionRequest(req, res, next) {
     const userLang = req.body.language || 'en';
     const prompt = buildPrompt(question, mode, userLang);
 
-    // 1. Google Gemini (primary cloud engine)
-    if (customKey || geminiKey) {
-      const answer = await callGeminiVision(base64Data, mimeType, prompt, customKey);
+    // AI Vision Pipeline: Dual-Engine with Automatic Failover (Gemini + OpenAI)
+    let answer = null;
+    let primaryErr = null;
+
+    const isCustomOpenAI = typeof customKey === 'string' && customKey.trim().startsWith('sk-');
+    const activeOpenAI = isCustomOpenAI
+      ? new OpenAI({ apiKey: customKey.trim(), timeout: 25000, maxRetries: 1 })
+      : openai;
+
+    // 1. Google Gemini (fast-first cloud engine if not explicitly an OpenAI key)
+    if (!isCustomOpenAI && (customKey || geminiKey)) {
+      try {
+        answer = await callGeminiVision(base64Data, mimeType, prompt, customKey);
+      } catch (geminiErr) {
+        primaryErr = geminiErr;
+        console.warn('[AURA AI] Gemini vision notice:', geminiErr.message, '— falling back to OpenAI.');
+      }
+    }
+
+    // 2. OpenAI Cloud Engine (seamless fallback or primary if OpenAI key specified)
+    if (!answer && activeOpenAI) {
+      try {
+        const imageUri = `data:${mimeType};base64,${base64Data}`;
+        const result = await activeOpenAI.chat.completions.create({
+          model: process.env.OPENAI_VISION_MODEL || 'gpt-4o-mini',
+          max_tokens: 160,
+          messages: [{
+            role: 'user',
+            content: [
+              { type: 'text', text: prompt },
+              { type: 'image_url', image_url: { url: imageUri, detail: 'low' } },
+            ],
+          }],
+        });
+
+        answer = result.choices?.[0]?.message?.content?.trim();
+      } catch (openAiErr) {
+        console.error('[AURA AI] OpenAI vision error:', openAiErr.message);
+        if (!primaryErr) primaryErr = openAiErr;
+      }
+    }
+
+    if (answer) {
       return res.json({ answer, success: true });
     }
 
-    // 2. OpenAI fallback if configured
-    if (openai) {
-      const imageUri = `data:${mimeType};base64,${base64Data}`;
-      const result = await openai.chat.completions.create({
-        model: process.env.OPENAI_VISION_MODEL || 'gpt-4o-mini',
-        max_tokens: 140,
-        messages: [{
-          role: 'user',
-          content: [
-            { type: 'text', text: prompt },
-            { type: 'image_url', image_url: { url: imageUri, detail: 'low' } },
-          ],
-        }],
-      });
-
-      const answer = result.choices?.[0]?.message?.content?.trim();
-      if (!answer) return res.status(502).json({ error: 'No description returned. Please try again.' });
-      return res.json({ answer, success: true });
-    }
-
-    return res.status(503).json({
-      error: 'GEMINI_API_KEY is not configured in .env and no API key was provided.',
-    });
+    throw primaryErr || new Error('No description returned. Please check API keys.');
   } catch (error) {
     next(error);
   }
@@ -287,6 +309,7 @@ if (fs.existsSync(distPath)) {
 }
 
 app.listen(port, () => {
+  const activeProviders = [geminiKey && 'Google Gemini', openai && 'OpenAI (gpt-4o-mini)'].filter(Boolean);
   console.log(`AURA AI backend listening on http://localhost:${port}`);
-  console.log(`AI active provider: ${geminiKey ? 'Google Gemini' : (openai ? 'OpenAI' : 'None')}`);
+  console.log(`AI active providers: ${activeProviders.join(' + ') || 'None'}`);
 });
