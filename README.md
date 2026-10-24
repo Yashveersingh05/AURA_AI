@@ -1,4 +1,4 @@
-# AURA AI — Assistive Vision for Visually Impaired Users
+# AURA AI — Assistive Vision for Visually Impaired Users...
 
 > **Empowering independence through real-time dual-engine vision, acoustic proximity sonar, and hands-free bilingual voice interaction.**
 
