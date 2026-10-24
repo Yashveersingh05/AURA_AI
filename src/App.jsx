@@ -75,6 +75,11 @@ function MainApp() {
   const onStopDetectionRef = useRef(null);
   const onStartDetectionRef = useRef(null);
   const isBusyRef = useRef(false);
+  const isUserSpeakingRef = useRef(false);
+
+  const handleSpeechActive = useCallback((active) => {
+    isUserSpeakingRef.current = active;
+  }, []);
 
   // 1. Camera Hook
   const {
@@ -109,6 +114,7 @@ function MainApp() {
     onToggleMute: (action) => onToggleMuteRef.current?.(action),
     onStopDetection: () => onStopDetectionRef.current?.(),
     onStartDetection: () => onStartDetectionRef.current?.(),
+    onSpeechActive: handleSpeechActive,
   });
 
   // 4. Real-time Spoken Obstacle Alert Handler (Only active when alerts are enabled)
@@ -141,6 +147,7 @@ function MainApp() {
   } = useTensorflow(videoRef, isCameraActive, {
     onObstacleAlert: handleObstacleAlert,
     isSpeaking,
+    isUserSpeaking: isUserSpeakingRef,
   });
 
   /* ================================================================
@@ -285,21 +292,15 @@ function MainApp() {
   const handleStartDetection = useCallback(() => {
     unlockAudio();
     startDetection();
-    const isHindi = activeLang && activeLang.startsWith('hi');
-    const msg = isHindi ? 'अलर्ट चालू।' : 'Alerts on.';
-    speak(msg);
-    setStatusText('Obstacle alerts active');
-  }, [startDetection, activeLang, speak, unlockAudio]);
+    setStatusText('Obstacle radar active — beeping continuously');
+  }, [startDetection, unlockAudio]);
 
   // User says "stop detection" or "alert off" -> stop camera detection alert
   const handleStopDetection = useCallback(() => {
     unlockAudio();
     stopDetection();
-    const isHindi = activeLang && activeLang.startsWith('hi');
-    const msg = isHindi ? 'अलर्ट बंद।' : 'Alerts off.';
-    speak(msg);
     setStatusText('Listening hands-free. Say "Hey Aura" anytime.');
-  }, [stopDetection, activeLang, speak, unlockAudio]);
+  }, [stopDetection, unlockAudio]);
 
   // Connect stable callback refs
   useEffect(() => {

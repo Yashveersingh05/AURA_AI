@@ -155,7 +155,7 @@ export function formatObstacleWarning(obstacle, isHindi) {
  * High-Sensitivity Real-Time Obstacle Detection + Sonar Proximity Beeps
  */
 export function useTensorflow(videoRef, isCameraActive, options = {}) {
-  const { onObstacleAlert, isSpeaking = false } = options;
+  const { onObstacleAlert, isSpeaking = false, isUserSpeaking } = options;
 
   const modelRef = useRef(null);
   const animFrameRef = useRef(null);
@@ -181,6 +181,15 @@ export function useTensorflow(videoRef, isCameraActive, options = {}) {
   useEffect(() => {
     isSpeakingRef.current = isSpeaking;
   }, [isSpeaking]);
+
+  const isUserSpeakingRef = useRef(false);
+  useEffect(() => {
+    if (isUserSpeaking && typeof isUserSpeaking === 'object' && 'current' in isUserSpeaking) {
+      isUserSpeakingRef.current = isUserSpeaking.current;
+    } else {
+      isUserSpeakingRef.current = !!isUserSpeaking;
+    }
+  });
 
   const [isModelLoading, setIsModelLoading] = useState(true);
   const [isModelReady, setIsModelReady] = useState(false);
@@ -258,7 +267,12 @@ export function useTensorflow(videoRef, isCameraActive, options = {}) {
 
   /* ---- Audible, Distance-Intensity Sonar Proximity Beep Generator ---- */
   const playProximityBeep = useCallback((frequency = 580, duration = 0.08, volume = 0.22) => {
-    if (isMutedRef.current || isPausedRef.current || !isDetectionActiveRef.current) {
+    const userSpeaking =
+      isUserSpeaking && typeof isUserSpeaking === 'object' && 'current' in isUserSpeaking
+        ? isUserSpeaking.current
+        : isUserSpeakingRef.current;
+
+    if (isMutedRef.current || isPausedRef.current || !isDetectionActiveRef.current || userSpeaking) {
       return;
     }
 
@@ -275,7 +289,7 @@ export function useTensorflow(videoRef, isCameraActive, options = {}) {
       const gain = ctx.createGain();
 
       // Duck volume if AI is currently speaking so voice remains clear, but NEVER mute beeps
-      const effectiveVol = isSpeakingRef.current ? Math.min(volume * 0.40, 0.10) : volume;
+      const effectiveVol = isSpeakingRef.current ? Math.min(volume * 0.35, 0.10) : volume;
 
       // Rich triangle wave harmonics audible on all phone and laptop speakers
       osc.type = 'triangle';
@@ -382,8 +396,8 @@ export function useTensorflow(videoRef, isCameraActive, options = {}) {
         isDetectingRef.current = true;
 
         try {
-          // Detect up to 10 objects with high sensitivity threshold (0.18)
-          const predictions = await modelRef.current.detect(video, 10, 0.18);
+          // Detect up to 10 objects with high sensitivity threshold (0.11 for close-up and low-light objects)
+          const predictions = await modelRef.current.detect(video, 10, 0.11);
           const frameWidth = video.videoWidth || 640;
           const frameHeight = video.videoHeight || 480;
           const frameArea = frameWidth * frameHeight;
@@ -415,20 +429,21 @@ export function useTensorflow(videoRef, isCameraActive, options = {}) {
               const isVehicle = ['car', 'bus', 'truck', 'motorcycle', 'bicycle'].includes(pred.class);
               const isAnimal = ['dog', 'cat', 'horse', 'cow'].includes(pred.class);
 
-              // Aspect-ratio and geometry-aware distance classification
+              // Aspect-ratio and geometry-aware distance classification (tuned for close-range sensitivity)
               let distanceLabel = 'far';
               if (isVehicle) {
-                if (areaRatio > 0.08 || widthRatio > 0.38) distanceLabel = 'urgent';
-                else if (areaRatio > 0.02 || widthRatio > 0.18) distanceLabel = 'close';
-                else if (areaRatio > 0.003 || widthRatio > 0.08) distanceLabel = 'medium';
+                if (areaRatio > 0.06 || widthRatio > 0.32) distanceLabel = 'urgent';
+                else if (areaRatio > 0.015 || widthRatio > 0.15) distanceLabel = 'close';
+                else if (areaRatio > 0.002 || widthRatio > 0.06) distanceLabel = 'medium';
               } else if (isPerson) {
-                if (areaRatio > 0.07 || heightRatio > 0.42) distanceLabel = 'urgent';
-                else if (areaRatio > 0.018 || heightRatio > 0.22) distanceLabel = 'close';
-                else if (areaRatio > 0.003 || heightRatio > 0.10) distanceLabel = 'medium';
+                if (areaRatio > 0.05 || heightRatio > 0.32) distanceLabel = 'urgent';
+                else if (areaRatio > 0.012 || heightRatio > 0.18) distanceLabel = 'close';
+                else if (areaRatio > 0.002 || heightRatio > 0.08) distanceLabel = 'medium';
               } else {
-                if (areaRatio > 0.12) distanceLabel = 'urgent';
-                else if (areaRatio > 0.025) distanceLabel = 'close';
-                else if (areaRatio > 0.004) distanceLabel = 'medium';
+                const maxDim = Math.max(widthRatio, heightRatio);
+                if (areaRatio > 0.05 || maxDim > 0.30) distanceLabel = 'urgent';
+                else if (areaRatio > 0.015 || maxDim > 0.16) distanceLabel = 'close';
+                else if (areaRatio > 0.003 || maxDim > 0.08) distanceLabel = 'medium';
               }
 
               // Threat prioritization: vehicles and pedestrians receive significant weight multipliers
@@ -442,7 +457,7 @@ export function useTensorflow(videoRef, isCameraActive, options = {}) {
                 ? Math.max(areaRatio, heightRatio * 0.25)
                 : isVehicle
                 ? Math.max(areaRatio, widthRatio * 0.25)
-                : areaRatio;
+                : Math.max(areaRatio, Math.max(widthRatio, heightRatio) * 0.20);
 
               const threatScore = sizeMetric * positionMultiplier * typeMultiplier;
 
@@ -470,27 +485,39 @@ export function useTensorflow(videoRef, isCameraActive, options = {}) {
           const now = Date.now();
 
           // 1. Dynamic Sonar Proximity Beeps according to distance of closer object
-          // Runs continuously whenever detection is active — no delay!
+          // Runs continuously whenever detection is active — zero lag
           if (highestThreat && !isMutedRef.current && !isPausedRef.current && isDetectionActiveRef.current) {
-            let rawCloseness = (highestThreat.areaRatio - 0.004) / 0.16;
+            let rawCloseness = 0;
             if (highestThreat.isPerson) {
-              rawCloseness = Math.max(rawCloseness, (highestThreat.heightRatio - 0.18) / 0.45);
+              rawCloseness = Math.max(
+                highestThreat.areaRatio / 0.06,
+                (highestThreat.heightRatio - 0.10) / 0.30
+              );
             } else if (highestThreat.isVehicle) {
-              rawCloseness = Math.max(rawCloseness, (highestThreat.widthRatio - 0.18) / 0.45);
+              rawCloseness = Math.max(
+                highestThreat.areaRatio / 0.06,
+                (highestThreat.widthRatio - 0.10) / 0.30
+              );
+            } else {
+              const maxDim = Math.max(highestThreat.widthRatio || 0, highestThreat.heightRatio || 0);
+              rawCloseness = Math.max(
+                highestThreat.areaRatio / 0.05,
+                maxDim / 0.30
+              );
             }
-            const closeness = Math.min(1, Math.max(0, rawCloseness));
+            const closeness = Math.min(1, Math.max(0.10, rawCloseness));
 
-            // Intensity (Volume): Scales dynamically from 0.08 (quiet distant ping) up to 0.40 (loud piercing urgent alert)
-            const beepVolume = 0.08 + closeness * 0.32;
+            // Intensity (Volume): Scales dynamically from 0.16 up to 0.44
+            const beepVolume = 0.16 + closeness * 0.28;
 
-            // Interval (Tempo): Scales from 900ms (far away relaxed tempo) down to 110ms (rapid-fire continuous alert)
-            const beepIntervalMs = Math.round(900 - closeness * 790);
+            // Interval (Tempo): Scales from 800ms down to 90ms (rapid-fire continuous alert)
+            const beepIntervalMs = Math.round(800 - closeness * 710);
 
-            // Pitch (Frequency): Scales from 380Hz (deep calm pulse) up to 1060Hz (sharp piercing alarm)
-            const beepFrequency = Math.round(380 + closeness * 680);
+            // Pitch (Frequency): Scales from 440Hz up to 1120Hz
+            const beepFrequency = Math.round(440 + closeness * 680);
 
-            // Duration: Far pulses are slightly smoother (85ms); close pings are crisp & punchy (48ms)
-            const beepDuration = Math.max(0.045, 0.085 - closeness * 0.037);
+            // Duration: Far pulses 80ms; close pings 45ms
+            const beepDuration = Math.max(0.045, 0.080 - closeness * 0.035);
 
             if (now - lastBeepTimeRef.current >= beepIntervalMs) {
               lastBeepTimeRef.current = now;
@@ -498,7 +525,7 @@ export function useTensorflow(videoRef, isCameraActive, options = {}) {
             }
 
             // Haptic buzz for dangerously close obstacles
-            if (closeness > 0.55 && now - lastVibrateTimeRef.current > 600) {
+            if (closeness > 0.50 && now - lastVibrateTimeRef.current > 500) {
               lastVibrateTimeRef.current = now;
               triggerHaptic([140, 50, 140]);
             }
@@ -581,7 +608,8 @@ export function useTensorflow(videoRef, isCameraActive, options = {}) {
   const startDetection = useCallback(() => {
     setIsDetectionActive(true);
     isDetectionActiveRef.current = true;
-    lastSpokenObstacleRef.current.timestamp = Date.now(); // Grace period so initial beeps are heard immediately
+    lastBeepTimeRef.current = 0; // Immediate beep on frame 1 without delay
+    lastSpokenObstacleRef.current.timestamp = Date.now() + 3500; // Prioritize proximity beeping for first 3.5s before spoken announcements
     playDirectTone(520, 880, 0.14, 0.30);
   }, [playDirectTone]);
 

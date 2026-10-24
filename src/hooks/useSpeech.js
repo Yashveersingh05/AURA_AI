@@ -16,7 +16,7 @@ export const STOP_WORDS_REGEX = /\b(stop|cancel|quiet|silence|hush|shut up|ruk|r
 export const isHindiText = (text) => {
   if (!text) return false;
   if (/[\u0900-\u097F]/.test(text)) return true;
-  return /\b(ki|kya|hai|hain|samne|saamne|aage|dikhao|dikh|batao|bataiye|dekh|dekho|yeh|ye|woh|wo|kahan|kidhar|mera|meri|mere|kaun|kitna|kitne|kaise|padh|padho|madad|namaste|shukriya|dhanyawad|ruko|bas|chup|phir|dobara|bata|likha|note|rupaye|paisa|paise|dawa|dawai|darwaza|kursi|table|chalu|band)\b/i.test(text);
+  return /\b(ki|kya|hai|hain|samne|saamne|aage|dikhao|dikh|batao|bataiye|dekh|dekho|yeh|ye|woh|wo|kahan|kidhar|mera|meri|mere|kaun|kitna|kitne|kaise|padh|padho|madad|namaste|shukriya|dhanyawad|ruko|bas|chup|phir|dobara|bata|likha|note|rupaye|paisa|paise|dawa|dawai|darwaza|kursi|chalu|band)\b/i.test(text);
 };
 
 export const detectLanguage = (text) => {
@@ -139,6 +139,7 @@ export function useSpeech(callbacks = {}) {
     onToggleMute,
     onStopDetection,
     onStartDetection,
+    onSpeechActive,
   } = callbacks;
 
   const recognitionRef = useRef(null);
@@ -158,6 +159,7 @@ export function useSpeech(callbacks = {}) {
   const onToggleMuteRef = useRef(onToggleMute);
   const onStopDetectionRef = useRef(onStopDetection);
   const onStartDetectionRef = useRef(onStartDetection);
+  const onSpeechActiveRef = useRef(onSpeechActive);
 
   useEffect(() => {
     onCommandRef.current = onCommand;
@@ -166,6 +168,7 @@ export function useSpeech(callbacks = {}) {
     onToggleMuteRef.current = onToggleMute;
     onStopDetectionRef.current = onStopDetection;
     onStartDetectionRef.current = onStartDetection;
+    onSpeechActiveRef.current = onSpeechActive;
   });
 
   const isSpeakingRef = useRef(false);
@@ -333,6 +336,14 @@ export function useSpeech(callbacks = {}) {
       setMicNotice('');
     };
 
+    recognition.onspeechstart = () => {
+      onSpeechActiveRef.current?.(true);
+    };
+
+    recognition.onspeechend = () => {
+      onSpeechActiveRef.current?.(false);
+    };
+
     recognition.onresult = (event) => {
       for (let i = event.resultIndex; i < event.results.length; ++i) {
         const rawTranscript = event.results[i][0].transcript.trim();
@@ -394,18 +405,15 @@ export function useSpeech(callbacks = {}) {
             if (activeWindowTimerRef.current) clearTimeout(activeWindowTimerRef.current);
             isAuraAwakeRef.current = false;
             isListeningPromptRef.current = false;
+            onSpeechActiveRef.current?.(false);
 
-            if (intent.type === 'stop_detection') {
+            if (intent.type === 'stop_detection' || intent.type === 'stop') {
+              stopSpeaking();
               onStopDetectionRef.current?.();
               return;
             }
             if (intent.type === 'start_detection') {
               onStartDetectionRef.current?.();
-              return;
-            }
-            if (intent.type === 'stop') {
-              stopSpeaking();
-              onBargeInRef.current?.();
               return;
             }
             if (intent.type === 'mute' || intent.type === 'unmute') {
@@ -421,6 +429,7 @@ export function useSpeech(callbacks = {}) {
 
         // If user said "Hey Aura" alone, open listening window
         if (hasWakeWord) {
+          onSpeechActiveRef.current?.(false);
           if (wakeDebounceTimerRef.current) clearTimeout(wakeDebounceTimerRef.current);
 
           wakeDebounceTimerRef.current = setTimeout(() => {
@@ -438,6 +447,7 @@ export function useSpeech(callbacks = {}) {
     };
 
     recognition.onerror = (event) => {
+      onSpeechActiveRef.current?.(false);
       isStartingRef.current = false;
       isRecognitionActiveRef.current = false;
       setIsListening(false);
@@ -450,6 +460,7 @@ export function useSpeech(callbacks = {}) {
     };
 
     recognition.onend = () => {
+      onSpeechActiveRef.current?.(false);
       isStartingRef.current = false;
       isRecognitionActiveRef.current = false;
       setIsListening(false);
