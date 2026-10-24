@@ -265,6 +265,13 @@ export function useSpeech(callbacks = {}) {
         const nextText = audioQueueRef.current.shift();
         const ttsUrl = `/api/tts?lang=${isHindi ? 'hi' : 'en'}&text=${encodeURIComponent(nextText)}`;
 
+        // Pipelining: Pre-fetch subsequent sentence in parallel so there is 0ms gap between sentences
+        if (audioQueueRef.current.length > 0) {
+          const aheadText = audioQueueRef.current[0];
+          const aheadUrl = `/api/tts?lang=${isHindi ? 'hi' : 'en'}&text=${encodeURIComponent(aheadText)}`;
+          fetch(aheadUrl).catch(() => {});
+        }
+
         if (!singleAudioRef.current) {
           singleAudioRef.current = new Audio();
         }
@@ -277,7 +284,18 @@ export function useSpeech(callbacks = {}) {
         };
 
         audio.onerror = () => {
-          console.warn('[AURA AI] TTS audio stream network error.');
+          console.warn('[AURA AI] TTS audio stream network issue, using edge speech.');
+          if (typeof window !== 'undefined' && window.speechSynthesis) {
+            try {
+              const utter = new SpeechSynthesisUtterance(nextText);
+              utter.lang = isHindi ? 'hi-IN' : 'en-US';
+              utter.rate = 1.05;
+              utter.onend = () => playNextChunk();
+              utter.onerror = () => playNextChunk();
+              window.speechSynthesis.speak(utter);
+              return;
+            } catch {}
+          }
           playNextChunk();
         };
 

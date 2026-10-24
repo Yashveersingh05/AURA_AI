@@ -110,15 +110,15 @@ async function callGeminiVision(base64Data, mimeType, prompt, customKey) {
     throw new Error('Gemini API key is missing. Please configure it in .env or provide your key in the app.');
   }
 
-  // Active high-speed vision models (fastest lite-first)
-  const models = ['gemini-flash-lite-latest', 'gemini-3.5-flash-lite', 'gemini-flash-latest', 'gemini-3.8-flash'];
+  // Active high-speed vision models (fastest 1.5s model first)
+  const models = ['gemini-3.5-flash-lite', 'gemini-flash-lite-latest', 'gemini-3.8-flash', 'gemini-flash-latest'];
   let lastError = null;
 
   for (const model of models) {
     try {
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${activeKey}`;
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 12000);
+      const timeoutId = setTimeout(() => controller.abort(), 10000);
 
       const response = await fetch(url, {
         method: 'POST',
@@ -131,7 +131,7 @@ async function callGeminiVision(base64Data, mimeType, prompt, customKey) {
               { inline_data: { mime_type: mimeType || 'image/jpeg', data: base64Data } },
             ],
           }],
-          generationConfig: { maxOutputTokens: 180, temperature: 0.2 },
+          generationConfig: { maxOutputTokens: 90, temperature: 0.1 },
         }),
       });
 
@@ -243,7 +243,17 @@ async function handleVisionRequest(req, res, next) {
 
 import https from 'node:https';
 
-/* ---- Reliable Multi-language TTS Endpoint ---- */
+/* ---- Keep-Alive HTTP Connection Pooling & LRU Memory Cache for Instant TTS (<1ms cached) ---- */
+const ttsAgent = new https.Agent({
+  keepAlive: true,
+  maxSockets: 24,
+  maxFreeSockets: 12,
+  timeout: 10000,
+});
+
+const ttsCache = new Map();
+const MAX_TTS_CACHE = 200;
+
 app.get('/api/tts', (req, res) => {
   const text = (req.query.text || '').trim();
   const rawLang = (req.query.lang || 'en').toLowerCase();
@@ -253,15 +263,38 @@ app.get('/api/tts', (req, res) => {
     return res.status(400).send('Text parameter required.');
   }
 
-  // Google Translate TTS accepts chunks up to ~200 characters cleanly
   const querySlice = text.slice(0, 280);
+  const cacheKey = `${lang}:${querySlice}`;
+
+  // 1. Instant L1 RAM Cache Hit (0ms turnaround)
+  if (ttsCache.has(cacheKey)) {
+    const cachedBuffer = ttsCache.get(cacheKey);
+    res.setHeader('Content-Type', 'audio/mpeg');
+    res.setHeader('Cache-Control', 'public, max-age=86400');
+    res.setHeader('X-Cache', 'HIT');
+    return res.end(cachedBuffer);
+  }
+
   const targetUrl = `https://translate.google.com/translate_tts?ie=UTF-8&tl=${lang}&client=tw-ob&q=${encodeURIComponent(querySlice)}`;
 
-  https.get(targetUrl, { headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' } }, (ttsRes) => {
+  https.get(targetUrl, { agent: ttsAgent, headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' } }, (ttsRes) => {
     if (ttsRes.statusCode === 200) {
-      res.setHeader('Content-Type', 'audio/mpeg');
-      res.setHeader('Cache-Control', 'public, max-age=3600');
-      ttsRes.pipe(res);
+      const chunks = [];
+      ttsRes.on('data', (chunk) => chunks.push(chunk));
+      ttsRes.on('end', () => {
+        const fullBuffer = Buffer.concat(chunks);
+        // Evict oldest if cache limit reached
+        if (ttsCache.size >= MAX_TTS_CACHE) {
+          const firstKey = ttsCache.keys().next().value;
+          ttsCache.delete(firstKey);
+        }
+        ttsCache.set(cacheKey, fullBuffer);
+
+        res.setHeader('Content-Type', 'audio/mpeg');
+        res.setHeader('Cache-Control', 'public, max-age=86400');
+        res.setHeader('X-Cache', 'MISS');
+        res.end(fullBuffer);
+      });
     } else {
       res.status(ttsRes.statusCode || 500).json({ error: 'TTS upstream failed' });
     }

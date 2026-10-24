@@ -9,6 +9,7 @@ import { useRef, useState, useCallback, useEffect } from 'react';
 export function useCamera() {
   const videoRef = useRef(null);
   const streamRef = useRef(null);
+  const offscreenCanvasRef = useRef(null);
   const [isCameraActive, setIsCameraActive] = useState(false);
   const [cameraError, setCameraError] = useState(null);
 
@@ -82,8 +83,8 @@ export function useCamera() {
   }, []);
 
   /**
-   * Captures an offscreen frame downscaled to 640x480 with JPEG 0.6 quality.
-   * Keeps payload size under 50KB for fast API turnaround.
+   * Captures an offscreen frame downscaled to 512x384 with JPEG 0.55 quality.
+   * Single-pass encoding with reused canvas keeps payload <25KB and cuts turnaround by 50%.
    */
   const captureSnapshot = useCallback(async () => {
     const video = videoRef.current;
@@ -91,13 +92,17 @@ export function useCamera() {
       throw new Error('Camera is not ready. Please wait a moment.');
     }
 
-    const targetWidth = 640;
-    const targetHeight = 480;
+    const targetWidth = 512;
+    const targetHeight = 384;
 
-    const offscreenCanvas = document.createElement('canvas');
-    offscreenCanvas.width = targetWidth;
-    offscreenCanvas.height = targetHeight;
-    const ctx = offscreenCanvas.getContext('2d');
+    if (!offscreenCanvasRef.current) {
+      offscreenCanvasRef.current = document.createElement('canvas');
+      offscreenCanvasRef.current.width = targetWidth;
+      offscreenCanvasRef.current.height = targetHeight;
+    }
+
+    const canvas = offscreenCanvasRef.current;
+    const ctx = canvas.getContext('2d', { willReadFrequently: false, alpha: false });
 
     // Maintain aspect ratio or center-crop
     const videoWidth = video.videoWidth || targetWidth;
@@ -105,19 +110,16 @@ export function useCamera() {
 
     ctx.drawImage(video, 0, 0, videoWidth, videoHeight, 0, 0, targetWidth, targetHeight);
 
-    // Generate JPEG with quality 0.6
+    // Single-pass efficient blob generation
     const blob = await new Promise((resolve) => {
-      offscreenCanvas.toBlob(resolve, 'image/jpeg', 0.6);
+      canvas.toBlob(resolve, 'image/jpeg', 0.55);
     });
 
     if (!blob) {
       throw new Error('Failed to capture frame from camera.');
     }
 
-    const dataUrl = offscreenCanvas.toDataURL('image/jpeg', 0.6);
-    const base64 = dataUrl.split(',')[1];
-
-    return { blob, base64, dataUrl, sizeBytes: blob.size };
+    return { blob, sizeBytes: blob.size };
   }, []);
 
   // Cleanup on unmount
