@@ -5,7 +5,7 @@
 AURA AI is a 100% voice-first, accessible web application designed specifically for blind and low-vision individuals. It pairs **local zero-latency edge detection (TensorFlow.js)** for obstacle avoidance and proximity sonar with **on-demand cloud intelligence (Google Gemini + OpenAI)** for currency recognition, OCR, and conversational scene understanding.
 
 ---
-
+..
 ## Architecture & Dual-Engine Overview
 
 ```
